@@ -138,6 +138,20 @@
 
         #video { width: 100%; max-width: 420px; border-radius: 8px; background: #000; display: none; }
         #camCanvas { display: none; }
+        .screen-capture {
+            display: none; position: relative; width: 100%; max-width: 720px; margin: 1rem 0;
+            background: #111; border-radius: 8px; overflow: hidden; border: 1px solid #ddd;
+            user-select: none; touch-action: none;
+        }
+        .screen-capture.active { display: block; }
+        #screenVideo { width: 100%; display: block; background: #111; }
+        .screen-selection {
+            display: none; position: absolute; border: 2px solid #00c853;
+            background: rgba(0, 200, 83, .12); box-shadow: 0 0 0 9999px rgba(0,0,0,.35);
+            pointer-events: none;
+        }
+        .screen-selection.active { display: block; }
+        #screenCanvas { display: none; }
     </style>
 </head>
 <body>
@@ -190,11 +204,18 @@
             </label>
             <button class="action" id="camStartBtn">开启摄像头</button>
             <button class="action ghost" id="camStopBtn" style="display:none">停止摄像头</button>
+            <button class="action ghost" id="screenStartBtn">捕获屏幕</button>
+            <button class="action ghost" id="screenStopBtn" style="display:none">停止捕获</button>
             <button class="action ghost" id="resetBtn">清空重来</button>
         </div>
-        <div class="hint">一张图片放一个二维码。摄像头需 HTTPS 或 localhost 环境；file:// 打开请用图片上传。</div>
+        <div class="hint">一张图片放一个二维码。摄像头和屏幕捕获需 HTTPS 或 localhost 环境；file:// 打开请用图片上传。</div>
         <video id="video" playsinline></video>
         <canvas id="camCanvas"></canvas>
+        <div class="screen-capture" id="screenCaptureBox">
+            <video id="screenVideo" playsinline muted></video>
+            <div class="screen-selection" id="screenSelection"></div>
+        </div>
+        <canvas id="screenCanvas"></canvas>
         <div class="status" id="decStatus"></div>
         <div class="progress-grid" id="progressGrid"></div>
         <div class="row" id="decActions" style="display:none">
@@ -532,6 +553,8 @@ qrStage.addEventListener('touchend', (e) => {
 const qrImageInput = document.getElementById('qrImageInput');
 const camStartBtn  = document.getElementById('camStartBtn');
 const camStopBtn   = document.getElementById('camStopBtn');
+const screenStartBtn = document.getElementById('screenStartBtn');
+const screenStopBtn  = document.getElementById('screenStopBtn');
 const resetBtn     = document.getElementById('resetBtn');
 const decStatus    = document.getElementById('decStatus');
 const progressGrid = document.getElementById('progressGrid');
@@ -539,6 +562,10 @@ const decActions   = document.getElementById('decActions');
 const rebuildBtn   = document.getElementById('rebuildBtn');
 const video        = document.getElementById('video');
 const camCanvas    = document.getElementById('camCanvas');
+const screenCaptureBox = document.getElementById('screenCaptureBox');
+const screenVideo  = document.getElementById('screenVideo');
+const screenSelection = document.getElementById('screenSelection');
+const screenCanvas = document.getElementById('screenCanvas');
 
 // 收集状态
 let collected = null; // { fileId, total, name, gz, crc, chunks: Map<index,data> }
@@ -551,6 +578,7 @@ function resetCollection() {
 }
 resetBtn.addEventListener('click', () => {
     stopCamera();
+    stopScreenCapture();
     resetCollection();
 });
 
@@ -584,6 +612,7 @@ function ingest(text) {
     if (collected.chunks.size === collected.total) {
         decActions.style.display = 'flex';
         setStatus(decStatus, `已集齐全部 ${collected.total} 块，文件「${collected.name}」可下载。`, 'ok');
+        stopScreenCapture();
     }
     return true;
 }
@@ -661,6 +690,7 @@ async function startCamera() {
         return;
     }
     try {
+        stopScreenCapture();
         stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
         video.srcObject = stream;
         await video.play();
@@ -699,6 +729,142 @@ function scanLoop() {
         }
     }
     requestAnimationFrame(scanLoop);
+}
+
+// 屏幕区域扫描
+let screenStream = null;
+let screenScanning = false;
+let screenScanTimer = null;
+let selectingScreenArea = false;
+let screenDragStart = null;
+let screenArea = null; // { x, y, w, h }，基于视频显示尺寸
+
+screenStartBtn.addEventListener('click', startScreenCapture);
+screenStopBtn.addEventListener('click', stopScreenCapture);
+
+async function startScreenCapture() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+        setStatus(decStatus, '当前环境不支持屏幕捕获（需 HTTPS 或 localhost）。', 'err');
+        return;
+    }
+    try {
+        stopCamera();
+        stopScreenCapture();
+        screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+        screenVideo.srcObject = screenStream;
+        await screenVideo.play();
+        screenStream.getVideoTracks().forEach(track => {
+            track.addEventListener('ended', stopScreenCapture);
+        });
+        screenArea = null;
+        screenSelection.classList.remove('active');
+        screenCaptureBox.classList.add('active');
+        screenStartBtn.style.display = 'none';
+        screenStopBtn.style.display = 'inline-block';
+        screenScanning = true;
+        setStatus(decStatus, '已开始屏幕捕获。请在预览画面中拖拽框选二维码播放区域。');
+        screenScanTimer = setInterval(scanScreenArea, 160);
+    } catch (e) {
+        stopScreenCapture();
+        setStatus(decStatus, '无法捕获屏幕：' + e.message, 'err');
+    }
+}
+
+function stopScreenCapture() {
+    screenScanning = false;
+    if (screenScanTimer) {
+        clearInterval(screenScanTimer);
+        screenScanTimer = null;
+    }
+    if (screenStream) {
+        screenStream.getTracks().forEach(t => t.stop());
+        screenStream = null;
+    }
+    screenVideo.srcObject = null;
+    screenCaptureBox.classList.remove('active');
+    screenSelection.classList.remove('active');
+    screenStartBtn.style.display = 'inline-block';
+    screenStopBtn.style.display = 'none';
+    selectingScreenArea = false;
+    screenDragStart = null;
+    screenArea = null;
+}
+
+screenCaptureBox.addEventListener('pointerdown', (e) => {
+    if (!screenScanning) return;
+    const p = getScreenPoint(e);
+    selectingScreenArea = true;
+    screenDragStart = p;
+    screenArea = { x: p.x, y: p.y, w: 0, h: 0 };
+    renderScreenSelection(screenArea);
+    screenCaptureBox.setPointerCapture(e.pointerId);
+});
+
+screenCaptureBox.addEventListener('pointermove', (e) => {
+    if (!selectingScreenArea || !screenDragStart) return;
+    const p = getScreenPoint(e);
+    screenArea = normalizeArea(screenDragStart, p);
+    renderScreenSelection(screenArea);
+});
+
+screenCaptureBox.addEventListener('pointerup', (e) => {
+    if (!selectingScreenArea) return;
+    selectingScreenArea = false;
+    if (screenArea && (screenArea.w < 24 || screenArea.h < 24)) {
+        screenArea = null;
+        screenSelection.classList.remove('active');
+        setStatus(decStatus, '选区太小，请重新框选二维码区域。', 'err');
+    } else if (screenArea) {
+        setStatus(decStatus, '正在扫描屏幕选区，请保持二维码在框内播放。');
+    }
+    try { screenCaptureBox.releasePointerCapture(e.pointerId); } catch (err) {}
+});
+
+function getScreenPoint(e) {
+    const rect = screenCaptureBox.getBoundingClientRect();
+    return {
+        x: Math.max(0, Math.min(rect.width, e.clientX - rect.left)),
+        y: Math.max(0, Math.min(rect.height, e.clientY - rect.top))
+    };
+}
+
+function normalizeArea(a, b) {
+    return {
+        x: Math.min(a.x, b.x),
+        y: Math.min(a.y, b.y),
+        w: Math.abs(a.x - b.x),
+        h: Math.abs(a.y - b.y)
+    };
+}
+
+function renderScreenSelection(area) {
+    screenSelection.style.left = area.x + 'px';
+    screenSelection.style.top = area.y + 'px';
+    screenSelection.style.width = area.w + 'px';
+    screenSelection.style.height = area.h + 'px';
+    screenSelection.classList.add('active');
+}
+
+function scanScreenArea() {
+    if (!screenScanning || !screenArea || screenVideo.readyState !== screenVideo.HAVE_ENOUGH_DATA) return;
+    const displayW = screenVideo.clientWidth;
+    const displayH = screenVideo.clientHeight;
+    if (!displayW || !displayH || !screenVideo.videoWidth || !screenVideo.videoHeight) return;
+
+    const scaleX = screenVideo.videoWidth / displayW;
+    const scaleY = screenVideo.videoHeight / displayH;
+    const sx = Math.max(0, Math.floor(screenArea.x * scaleX));
+    const sy = Math.max(0, Math.floor(screenArea.y * scaleY));
+    const sw = Math.max(1, Math.floor(screenArea.w * scaleX));
+    const sh = Math.max(1, Math.floor(screenArea.h * scaleY));
+
+    screenCanvas.width = sw;
+    screenCanvas.height = sh;
+    const ctx = screenCanvas.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(screenVideo, sx, sy, sw, sh, 0, 0, sw, sh);
+    const imgData = ctx.getImageData(0, 0, sw, sh);
+    const code = jsQR(imgData.data, imgData.width, imgData.height, { inversionAttempts: 'dontInvert' });
+    if (code) ingest(code.data);
 }
 
 // 重组并下载
