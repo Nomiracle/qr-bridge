@@ -101,8 +101,9 @@
             padding: 0; cursor: pointer;
         }
         .qr-dot.active { background: #333; }
-        .qr-bar { height: 8px; background: #eee; border-radius: 999px; overflow: hidden; }
-        .qr-bar-fill { height: 100%; width: 0; background: #333; }
+        .qr-slider {
+            width: 100%; accent-color: #333; cursor: pointer;
+        }
         .qr-controls {
             display: flex; align-items: center; justify-content: center; gap: .75rem;
             flex-wrap: wrap;
@@ -199,7 +200,7 @@
             <div class="qr-controls" id="encActions">
                 <button class="action" id="playQrBtn" type="button">自动播放</button>
                 <label class="qr-speed">速度
-                    <input type="number" id="playSpeed" value="1500" min="800" max="3000" step="100">
+                    <input type="number" id="playSpeed" value="1500" min="100" max="3000" step="100">
                     ms
                 </label>
                 <button class="action ghost" id="downloadCurrentBtn" type="button">下载当前</button>
@@ -470,13 +471,16 @@ function renderQrProgress() {
         }
         qrProgress.appendChild(dots);
     } else {
-        const bar = document.createElement('div');
-        bar.className = 'qr-bar';
-        const fill = document.createElement('div');
-        fill.className = 'qr-bar-fill';
-        fill.style.width = `${((qrState.currentIndex + 1) / qrState.total) * 100}%`;
-        bar.appendChild(fill);
-        qrProgress.appendChild(bar);
+        const slider = document.createElement('input');
+        slider.type = 'range';
+        slider.className = 'qr-slider';
+        slider.min = '1';
+        slider.max = String(qrState.total);
+        slider.step = '1';
+        slider.value = String(qrState.currentIndex + 1);
+        slider.setAttribute('aria-label', '跳转到指定二维码');
+        slider.addEventListener('change', () => goToQr(parseInt(slider.value, 10) - 1));
+        qrProgress.appendChild(slider);
     }
 }
 
@@ -492,7 +496,7 @@ function stepQr(delta) {
 
 function getPlaySpeed() {
     let speed = parseInt(playSpeedEl.value, 10);
-    if (!speed || speed < 800) speed = 800;
+    if (!speed || speed < 100) speed = 100;
     if (speed > 3000) speed = 3000;
     playSpeedEl.value = speed;
     return speed;
