@@ -152,6 +152,20 @@
         }
         .screen-selection.active { display: block; }
         #screenCanvas { display: none; }
+        .scan-floating {
+            display: none; position: fixed; right: 18px; bottom: 18px; z-index: 20;
+            width: min(300px, calc(100vw - 36px)); padding: 14px;
+            color: #f8f8f8; background: rgba(20, 20, 20, .92);
+            border: 1px solid rgba(255,255,255,.16); border-radius: 8px;
+            box-shadow: 0 10px 28px rgba(0,0,0,.22);
+        }
+        .scan-floating.active { display: block; }
+        .scan-floating.done { background: rgba(6, 117, 59, .94); }
+        .scan-floating-title { font-size: 12px; color: rgba(255,255,255,.72); margin-bottom: 6px; }
+        .scan-floating-count { font-size: 28px; font-weight: 700; line-height: 1; margin-bottom: 10px; }
+        .scan-floating-bar { height: 8px; background: rgba(255,255,255,.18); border-radius: 999px; overflow: hidden; }
+        .scan-floating-fill { width: 0; height: 100%; background: #00c853; }
+        .scan-floating-meta { margin-top: 8px; font-size: 12px; color: rgba(255,255,255,.78); }
     </style>
 </head>
 <body>
@@ -222,6 +236,12 @@
             <button class="action" id="rebuildBtn">下载还原文件</button>
         </div>
     </div>
+</div>
+<div class="scan-floating" id="scanFloating" aria-live="polite">
+    <div class="scan-floating-title" id="scanFloatingTitle">扫码进度</div>
+    <div class="scan-floating-count" id="scanFloatingCount">0 / 0</div>
+    <div class="scan-floating-bar"><div class="scan-floating-fill" id="scanFloatingFill"></div></div>
+    <div class="scan-floating-meta" id="scanFloatingMeta">等待扫码</div>
 </div>
 
 <script>
@@ -566,14 +586,23 @@ const screenCaptureBox = document.getElementById('screenCaptureBox');
 const screenVideo  = document.getElementById('screenVideo');
 const screenSelection = document.getElementById('screenSelection');
 const screenCanvas = document.getElementById('screenCanvas');
+const scanFloating = document.getElementById('scanFloating');
+const scanFloatingTitle = document.getElementById('scanFloatingTitle');
+const scanFloatingCount = document.getElementById('scanFloatingCount');
+const scanFloatingFill = document.getElementById('scanFloatingFill');
+const scanFloatingMeta = document.getElementById('scanFloatingMeta');
 
 // 收集状态
 let collected = null; // { fileId, total, name, gz, crc, chunks: Map<index,data> }
+const defaultTitle = document.title;
+let notifyPermissionAsked = false;
+let audioCtx = null;
 
 function resetCollection() {
     collected = null;
     progressGrid.innerHTML = '';
     decActions.style.display = 'none';
+    resetScanFeedback();
     setStatus(decStatus, '');
 }
 resetBtn.addEventListener('click', () => {
@@ -596,6 +625,7 @@ function ingest(text) {
     if (!collected) {
         collected = { fileId, total, name: decodeName(nameB64), gz: gz === '1', crc, chunks: new Map() };
         buildProgressGrid(total);
+        updateScanFeedback(null);
     }
     // 不同文件批次：忽略
     if (collected.fileId !== fileId) {
@@ -608,13 +638,78 @@ function ingest(text) {
     const cell = progressGrid.children[index];
     if (cell) cell.classList.add('got');
 
+    updateScanFeedback(index);
+    playScanTone(false);
     updateDecStatus();
     if (collected.chunks.size === collected.total) {
         decActions.style.display = 'flex';
         setStatus(decStatus, `已集齐全部 ${collected.total} 块，文件「${collected.name}」可下载。`, 'ok');
+        updateScanFeedback(index, true);
+        playScanTone(true);
+        sendScanNotification();
         stopScreenCapture();
     }
     return true;
+}
+
+function resetScanFeedback() {
+    document.title = defaultTitle;
+    scanFloating.classList.remove('active', 'done');
+    scanFloatingTitle.textContent = '扫码进度';
+    scanFloatingCount.textContent = '0 / 0';
+    scanFloatingFill.style.width = '0';
+    scanFloatingMeta.textContent = '等待扫码';
+}
+
+function updateScanFeedback(lastIndex, done) {
+    if (!collected) {
+        resetScanFeedback();
+        return;
+    }
+    const got = collected.chunks.size;
+    const total = collected.total;
+    const percent = total ? Math.round((got / total) * 100) : 0;
+    scanFloating.classList.add('active');
+    scanFloating.classList.toggle('done', !!done);
+    scanFloatingTitle.textContent = done ? '已集齐' : `扫码中 ${percent}%`;
+    scanFloatingCount.textContent = `${got} / ${total}`;
+    scanFloatingFill.style.width = percent + '%';
+    scanFloatingMeta.textContent = lastIndex === null || lastIndex === undefined
+        ? `文件：${collected.name}`
+        : `最近：第 ${lastIndex + 1} 块，缺失 ${Math.max(0, total - got)} 块`;
+    document.title = done ? `完成 ${got}/${total} - QR Bridge` : `${got}/${total} - QR Bridge`;
+}
+
+function requestNotificationPermission() {
+    if (!('Notification' in window) || notifyPermissionAsked) return;
+    notifyPermissionAsked = true;
+    if (Notification.permission === 'default') Notification.requestPermission();
+}
+
+function sendScanNotification() {
+    if (!('Notification' in window) || Notification.permission !== 'granted' || !collected) return;
+    new Notification('二维码已集齐', {
+        body: `文件「${collected.name}」已获取 ${collected.total} / ${collected.total}，可以回到页面下载还原文件。`
+    });
+}
+
+function playScanTone(done) {
+    try {
+        const Ctx = window.AudioContext || window.webkitAudioContext;
+        if (!Ctx) return;
+        if (!audioCtx) audioCtx = new Ctx();
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = 'sine';
+        osc.frequency.value = done ? 880 : 520;
+        gain.gain.value = done ? 0.08 : 0.035;
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        const now = audioCtx.currentTime;
+        osc.start(now);
+        gain.gain.exponentialRampToValueAtTime(0.0001, now + (done ? 0.32 : 0.08));
+        osc.stop(now + (done ? 0.34 : 0.1));
+    } catch (e) {}
 }
 
 function buildProgressGrid(total) {
@@ -690,6 +785,7 @@ async function startCamera() {
         return;
     }
     try {
+        requestNotificationPermission();
         stopScreenCapture();
         stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
         video.srcObject = stream;
@@ -748,6 +844,7 @@ async function startScreenCapture() {
         return;
     }
     try {
+        requestNotificationPermission();
         stopCamera();
         stopScreenCapture();
         screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
